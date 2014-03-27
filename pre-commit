@@ -1,0 +1,101 @@
+#! /bin/bash
+# This script blocks commits from banned users
+# 95% of the credit goes to stackoverflow user torek
+# http://bit.ly/1hYQJzq
+
+# List of users to block
+banned_users=( root  )
+
+# List of only allowed emails (leave blank to ignore)
+authorized_emails=( facebook.com aol.com )
+
+NULL_SHA1="0000000000000000000000000000000000000000" # 40 0's
+new_list=
+any_deleted=false
+while read oldsha newsha refname; do
+    case $oldsha,$newsha in
+    *,$NULL_SHA1) # it's a delete
+        any_deleted=true;;
+    $NULL_SHA1,*) # it's a create
+        new_list="$new_list $newsha";;
+    *,*) # it's an update
+        new_list="$new_list $newsha";;
+    esac
+done
+$any_deleted && [ -n "$new_list" ] && {
+    echo 'error: you are deleting some refs and creating/updating others'
+    echo 'please split your push into separate operations'
+    exit 1
+}
+[ -z "$new_list" ] && exit 0
+
+# look at all new objects, and verify them
+# let's write the verifier function, including a check_banned function...
+check_banned_user() {
+    for auser in "${banned_users[@]}"
+    do
+        :
+        if [ "$1" = ${auser} ]; then
+            echo "###################################################"
+            echo "# Commits from user '$1' are not allowed"
+            echo "# To fix, execute the following for all commits"
+            echo "# git config user.name \"Bob Smith\" --replace-all"
+            echo "# git config user.email bob@aol.com"
+            echo "# git commit --amend --reset-author"
+            echo "###################################################"
+            exit 1
+        fi
+    done
+}
+
+# Only allow commits from users with email addresses in specific domain
+check_authorized_email() {
+    commit_email=$1
+    commit_email_domain=`echo $commit_email | /usr/bin/tr '@' '\n' | /usr/bin/tail -n +2`
+    email_approved=false
+
+    for aemail in "${authorized_emails[@]}"
+    do
+        :
+        if [[ "${aemail}" == "${commit_email_domain}" ]]
+            then
+            email_approved=true
+        fi
+    done
+
+    if [ $email_approved != true ]
+        then
+        echo "###########################################################"
+        echo "# Only commits from whitelisted email domains are allowed #"
+        echo "# Fix the author email and try again                      #" 
+        echo "###########################################################"
+        exit 1;
+    fi
+}
+
+check_commit() {
+    # Check Author Name
+    check_banned_user "$(git log -1 --pretty=format:%an $1)"
+    # Check Comitter Name
+    check_banned_user "$(git log -1 --pretty=format:%cn $1)"
+
+    if [[ ${#authorized_emails[@]} -eq 0 ]]
+        then
+        echo "Email verification is disabled"
+        return 0
+    else
+        # Check Author Email
+        check_authorized_email "$(git log -1 --pretty=format:%ae $1)"
+        # Check Comitter Email
+        check_authorized_email "$(git log -1 --pretty=format:%ce $1)"
+    fi
+}
+
+
+git rev-list $new_list --not --all |
+while read sha1; do
+    objtype=$(git cat-file -t $sha1)
+    case $objtype in
+    commit) check_commit $sha1;;
+    esac
+done
